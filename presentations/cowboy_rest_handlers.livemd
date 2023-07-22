@@ -1,0 +1,421 @@
+# Using :cowboy rest_handlers to Build APIs
+
+```elixir
+Mix.install([
+  {:cowboy, "~> 2.10"},
+  {:httpoison, "~> 2.1"},
+  {:jason, "1.4.1"},
+  {:kino_vega_lite, "~> 0.1.7"}
+])
+
+HTTPoison.start()
+
+defmodule CowboyDemoHelpers do
+  def restart_cowboy(resource_module) do
+    stop_cowboy()
+
+    {:ok, _supervisor_pid} =
+      :cowboy.start_clear(
+        :meetup_demo,
+        [port: 8081],
+        %{env: %{dispatch: routing_table(resource_module)}}
+      )
+  end
+
+  def stop_cowboy() do
+    :cowboy.stop_listener(:meetup_demo)
+  end
+
+  defp routing_table(resource_module) do
+    # Add routes here
+    routes = [
+      {"/cake", resource_module, []},
+      {"/cake/:id", resource_module, []}
+    ]
+
+    :cowboy_router.compile([{:_, routes}])
+  end
+end
+```
+
+## Intro
+
+> [...] the request is handled as a state machine with many optional callbacks describing the resource and modifying the machine's behavior
+> 
+> – *[The Cowboy docs](https://ninenines.eu/docs/en/cowboy/1.0/guide/rest_handlers/)*
+
+<!--
+ ### Plug based approach
+
+Transforming a request until it becomes a response
+
+Feels familiar to using the pipe operator`|>`
+
+### WebMachine / rest_handlers
+
+Describe your resources, let a state-machine handle building the request 
+-->
+
+## First: Routes and a Handler
+
+```elixir
+defmodule Routes do
+  def routing_table do
+    [{"/", HelloWorldHandler, []}]
+  end
+
+  def compiled_routing_table do
+    # Routes in cowboy are {host, [paths]} tuples
+    # The :_ atom causes cowboy_router to match any host.
+    :cowboy_router.compile([{:_, routing_table()}])
+  end
+end
+```
+
+```elixir
+defmodule HelloWorldHandler do
+  def init(request, _options) do
+    {:ok, request, %{}}
+  end
+end
+```
+
+## Start Cowboy
+
+```elixir
+:cowboy.stop_listener(:meetup_demo)
+
+{:ok, supervisor_pid} =
+  :cowboy.start_clear(
+    :meetup_demo,
+    [port: 8081],
+    %{env: %{dispatch: Routes.compiled_routing_table()}}
+  )
+```
+
+### Lets check that it worked
+
+```elixir
+HTTPoison.get!("http://localhost:8081/")
+```
+
+## Status Code Reminder #1
+
+![](https://http.cat/204)
+
+## The First Resource
+
+Let's get the first resource created: We'll allow `GET` and `OPTION` requests for now.
+
+```elixir
+defmodule Cake do
+  def init(request, _options) do
+    # Tell :cowboy that we want to use cowboy_rest handers
+    {:cowboy_rest, request, %{}}
+  end
+
+  def allowed_methods(request, state) do
+    {~w(GET OPTIONS), request, state}
+  end
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake)
+```
+
+## Lets see it in action 🍰
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake")
+```
+
+## Status Code Reminder #2
+
+![](https://http.cat/500)
+
+## Well... that's unfortunate....
+
+```elixir
+defmodule Cake2 do
+  def init(request, _options), do: {:cowboy_rest, request, %{}}
+  def allowed_methods(request, state), do: {~w(GET OPTIONS), request, state}
+
+  def content_types_provided(request, state) do
+    # content_types_provided defaults to {"text/html", :to_html}, so we override it
+    {
+      [
+        # Telling :cowboy to call to_json/2 when the client asks for json
+        {"application/json", :to_json}
+      ],
+      request,
+      state
+    }
+  end
+
+  def to_json(request, state) do
+    {Jason.encode!(%{name: "🍰"}), request, state}
+  end
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake2)
+```
+
+### Let's try that again
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake")
+```
+
+## Status Code Reminder #3
+
+![](https://http.cat/200)
+
+## Additional Content-Types
+
+```elixir
+defmodule Cake3 do
+  def init(request, _options), do: {:cowboy_rest, request, %{}}
+  def allowed_methods(request, state), do: {~w(GET OPTIONS), request, state}
+
+  def content_types_provided(request, state) do
+    {
+      [
+        {"application/json", :to_json},
+        # Client also wants xml
+        {"application/xml", :to_xml}
+      ],
+      request,
+      state
+    }
+  end
+
+  def to_json(request, state) do
+    {Jason.encode!(%{name: "🍰"}), request, state}
+  end
+
+  def to_xml(request, state) do
+    # 😱
+    {"""
+     <soap:Envelope>
+       <im>
+         <not>
+           <doing>
+             <soap>
+               <ever>
+                 <again/>
+               </ever>
+             </soap>
+           </doing>
+         </not>
+       </im>
+     </soap:Envelope>
+     """, request, state}
+  end
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake3)
+```
+
+## A New Header Appears
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake", accept: "application/xml")
+```
+
+> The Vary HTTP response header describes the parts of the request message aside from the method and URL that influenced the content of the response it occurs in.
+
+Source: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary
+
+<!-- livebook:{"break_markdown":true} -->
+
+### What happens if we request a unsupported content-type?
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake", accept: "text/csv")
+```
+
+![](https://http.cat/406)
+
+## Gotcha: Authentication and Authorization
+
+⛔️ Cowboy rest handlers default to **no security!** ⛔️
+
+<!-- livebook:{"break_markdown":true} -->
+
+<!-- Learn more at https://mermaid-js.github.io/mermaid -->
+
+```mermaid
+stateDiagram-v2
+    [*] --> is_autorized?
+    is_autorized? --> forbidden?: Yes
+    is_autorized? --> 401: No
+    forbidden? --> [*]: No
+    forbidden? --> 403: Yes
+```
+
+```elixir
+defmodule Cake4 do
+  def init(request, _options), do: {:cowboy_rest, request, %{}}
+  def allowed_methods(request, state), do: {~w(GET OPTIONS), request, state}
+
+  def is_authorized(request, state) do
+    # Inform the client that they need to use Basic authentication
+    {true, request, state}
+  end
+
+  def forbidden(request, state) do
+    # Don't allow anyone to do anything
+    {true, request, state}
+  end
+
+  def content_types_provided(request, state),
+    do: {[{"application/json", :to_json}, {"application/xml", :to_xml}], request, state}
+
+  def to_json(request, state), do: {Jason.encode!(%{name: "🍰"}), request, state}
+  def to_xml(request, state), do: {"<soap:Envelope/>", request, state}
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake4)
+```
+
+## The www-authenticate header
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake")
+```
+
+## Status Code Reminder #4
+
+![](https://http.cat/401)
+![](https://http.cat/403)
+
+## Using the State to Pass Data Around
+
+```elixir
+defmodule Cake5 do
+  def init(request, _options), do: {:cowboy_rest, request, %{}}
+  def allowed_methods(request, state), do: {~w(GET OPTIONS), request, state}
+
+  def is_authorized(request, state) do
+    # Grab the contents of the 'authorization' header - it'll be nil if not present
+    user = :cowboy_req.header("authorization", request)
+
+    case user do
+      :undefined -> {{false, "Basic"}, request, state}
+      # We have authentication information. Do user lookup. Put information into the state
+      _ -> {true, request, Map.put(state, :user, user)}
+    end
+  end
+
+  def forbidden(request, state = %{user: "Bob"}) do
+    # We know "Bob". Bob is ok. 
+    {false, request, state}
+  end
+
+  def forbidden(request, state) do
+    {true, request, state}
+  end
+
+  def content_types_provided(request, state),
+    do: {[{"application/json", :to_json}, {"application/xml", :to_xml}], request, state}
+
+  def to_json(request, state), do: {Jason.encode!(%{name: "🍰"}), request, state}
+  def to_xml(request, state), do: {"<soap:Envelope/>", request, state}
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake5)
+```
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake", authorization: "Alice")
+```
+
+## Route Arguments
+
+I've cheated and already added a route with a argument
+
+<!-- livebook:{"force_markdown":true} -->
+
+`````elixir
+
+ routes = [
+      {"/cake", resource_module, []},
+      {"/cake/:id", resource_module, []}
+    ]
+````
+`````
+
+```elixir
+defmodule Cake6 do
+  def init(request, _options), do: {:cowboy_rest, request, %{}}
+  def allowed_methods(request, state), do: {~w(GET OPTIONS), request, state}
+
+  def resource_exists(request, state) do
+    # Grabbing the `:id` argument from the route
+    id = :cowboy_req.binding(:id, request)
+
+    case id do
+      :undefined ->
+        {false, request, state}
+
+      id ->
+        # Do the work to fetch the resource (DB lookop, etc.)
+        this_specific_cake = "🎂 #{id}"
+
+        # Add it to the state and respond
+        {true, request, Map.put(state, :cake, this_specific_cake)}
+    end
+  end
+
+  def to_json(request, state) do
+    # We've already done the work to fetch the resouce, so we only need to encode it here
+    {Jason.encode!(%{name: state[:cake]}), request, state}
+  end
+
+  def to_xml(request, state) do
+    # We've already done the work to fetch the resouce, so we only need to encode it here
+    {"<cake>#{state[:cake]}</cake>", request, state}
+  end
+
+  def content_types_provided(request, state),
+    do: {[{"application/json", :to_json}, {"application/xml", :to_xml}], request, state}
+end
+
+CowboyDemoHelpers.restart_cowboy(Cake6)
+```
+
+```elixir
+HTTPoison.get!("http://localhost:8081/cake/")
+```
+
+## Status Code Reminder #5
+
+![](https://http.cat/404)
+
+## Batteries not Included
+
+* You have to build you own logging approach
+* Get used to Erlang stack traces
+* Phoenix does a lot to help the developer along. Automatic recompilation, great getting started guides, and excellently helpful error messages. Cowboy has none of that.
+
+## Why then?
+
+* You get very consistent APIs
+
+* The architechure helps seperate concerns and facilitates small functions
+
+* Easy to unit-test specifics of the API
+
+* We were API first, so we didn't need or use a lot of Phoenix
+
+* Fine grained user-rights can be cumbersome with `plug`
+
+  ```elixir
+  plug :authorize, [permissions: ["Read: Sessions"]] when action in [:list, :show, :list_by_team]
+  plug :authorize, [permissions: ["Create: Sessions"]] when action in [:create]
+  plug :authorize, [permissions: ["Update: Sessions"]] when action in [:update]
+  plug :authorize, [permissions: ["Delete: Sessions"]] when action in [:delete]
+  ```
+
+* Same kind of issue with schema validations
+
+## Questions?
