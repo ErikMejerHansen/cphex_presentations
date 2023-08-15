@@ -1,0 +1,62 @@
+# State Machines are Awesome
+
+```elixir
+Mix.install(
+  [
+    {:my_app, path: Path.join(__DIR__, ".."), env: :dev}
+  ],
+  config_path: :my_app,
+  lockfile: :my_app
+)
+```
+
+## Section
+
+https://adventofcode.com/2021/day/16
+
+<!-- livebook:{"break_markdown":true} -->
+
+```mermaid
+stateDiagram-v2
+  pv: Parse Version
+  pt: Parse Type
+  pl: Parse Literal
+  po: Parse Operator
+  pg: Parse Group
+  plt: Parse Length Type
+  p15: Parse Subpackets length 15
+  p11: Parse Subpackets length 11
+  [*]--> pv
+
+  pv-->pt
+  pt-->pl
+  pt-->po
+  pl-->pg
+  pg-->pg
+  pg-->pv
+  po-->plt
+  plt-->p15
+  plt-->p11
+  p15-->pv
+  p11-->pv
+
+
+  
+```
+
+```elixir
+ExUnit.start(autorun: false)
+
+defmodule BitsDecoderTest do
+  use ExUnit.Case, async: true
+
+  test "it can decode version" do
+  end
+end
+
+ExUnit.run()
+```
+
+```elixir
+
+```
